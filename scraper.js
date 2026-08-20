@@ -9,6 +9,7 @@ const L = lauxlib.luaL_newstate();
 lualib.luaL_openlibs(L);
 lauxlib.luaL_dostring(L, to_luastring(fs.readFileSync('a.lua', 'utf8')));
 
+// Các API nguồn phụ (dạng success/data)
 const extraApis = [
     { name: "RipIndra",      url: "http://fi11.bot-hosting.net:20758/api/name=RipIndra" },
     { name: "RipIndra",      url: "http://fi6.bot-hosting.net:21934/api?name=RipIndra" },
@@ -29,6 +30,7 @@ const extraApis = [
     { name: "CakeQueen",     url: "http://fi11.bot-hosting.net:20758/api/name=CakeQueen" },
 ];
 
+// Nguồn API "noencode"
 const apiCau3 = [
     { name: "FullMoon",      url: "http://160.187.246.8:9999/output/noencode/premium/fullmoon" },
     { name: "Elite",         url: "http://160.187.246.8:9999/output/noencode/premium/elite" },
@@ -110,24 +112,38 @@ function parseLooseJsonArray(text) {
 function saveToApi(name, dataList) {
     if (!fs.existsSync('api')) fs.mkdirSync('api');
     
+    // Chuẩn hóa tên file: bỏ dấu cách, viết thường
+    const fileName = `api/${name.replace(/\s+/g, '').toLowerCase()}.json`;
+    
+    // Đọc dữ liệu cũ để tránh ghi đè
+    let existingData = [];
+    if (fs.existsSync(fileName)) {
+        try {
+            existingData = JSON.parse(fs.readFileSync(fileName, 'utf8'));
+            if (!Array.isArray(existingData)) existingData = [];
+        } catch (e) { existingData = []; }
+    }
+    
+    // Merge và lọc trùng jobId
+    const allData = [...existingData, ...dataList];
     const seen = {};
     const unique = [];
-    dataList.forEach(item => {
+    allData.forEach(item => {
         if (!seen[item.jobId]) {
             seen[item.jobId] = true;
             unique.push(item);
         }
     });
     
-    const fileName = `api/${name.replace(/\s+/g, '').toLowerCase()}.json`;
     fs.writeFileSync(fileName, JSON.stringify(unique, null, 2));
-    console.log(`✅ Lưu ${unique.length} mục (loại ${dataList.length - unique.length} trùng) → ${fileName}`);
+    console.log(`✅ Lưu ${unique.length} mục (thêm ${dataList.length} mới) → ${fileName}`);
 }
 
 async function updateAll() {
     console.log(`\n📡 [${new Date().toLocaleTimeString()}] Đang cập nhật dữ liệu...`);
     const allGroups = {};
     
+    // 1. Nguồn chính (Banana)
     try {
         console.log("  ⏳ Lấy từ nguồn chính (Banana)...");
         const luaRes = await axios.get(bananaApi, {
@@ -138,15 +154,25 @@ async function updateAll() {
         if (luaRes.data?.data) {
             let count = 0;
             luaRes.data.data.forEach(item => {
+                // Giải mã jobId
                 lua.lua_getglobal(L, to_luastring('lebidlyjyf'));
                 lua.lua_pushstring(L, to_luastring(item.jobid));
                 if (lua.lua_pcall(L, 1, 1, 0) === 0) {
                     const decoded = lua.lua_tojsstring(L, -1);
-                    if (!allGroups[item.name]) allGroups[item.name] = [];
-                    allGroups[item.name].push({
-                        placeId: item.placeid,
+                    // Lấy tên loại (chuẩn hóa)
+                    let typeName = item.name;
+                    // Map tên từ Banana sang tên chuẩn nếu cần
+                    if (typeName === "FullMoon") typeName = "Fullmoon";
+                    if (typeName === "Cake Queen") typeName = "CakeQueen";
+                    if (typeName === "Cake Prince") typeName = "CakePrince";
+                    if (typeName === "Cursed Captain") typeName = "CursedCaptain";
+                    if (typeName === "Raid Castle") typeName = "RaidCastle";
+                    
+                    if (!allGroups[typeName]) allGroups[typeName] = [];
+                    allGroups[typeName].push({
+                        placeId: item.placeid || "27470683",
                         players: normalizePlayers(item.Players),
-                        jobId: decoded
+                        jobId: decoded || item.jobid
                     });
                     count++;
                     lua.lua_pop(L, 1);
@@ -160,6 +186,7 @@ async function updateAll() {
         console.error(`  ❌ Lỗi nguồn chính:`, e.message); 
     }
 
+    // 2. Nguồn phụ (extraApis)
     const fetchPromises = extraApis.map(async (api) => {
         try {
             const res = await fetch(api.url, {
@@ -176,18 +203,19 @@ async function updateAll() {
                 if (!allGroups[api.name]) allGroups[api.name] = [];
                 json.data.forEach(item => {
                     allGroups[api.name].push({
-                        placeId: item.placeid,
-                        players: normalizePlayers(item.player),
-                        jobId: item.jobid
+                        placeId: item.placeid || "27470683",
+                        players: normalizePlayers(item.player || item.Players),
+                        jobId: item.jobid || item.JobId
                     });
                 });
-                console.log(`  ✅ ${api.name}: ${json.count} server`);
+                console.log(`  ✅ ${api.name}: ${json.count || json.data.length} server`);
             }
         } catch (e) {
             console.error(`  ❌ ${api.name}: ${e.message}`);
         }
     });
 
+    // 3. Nguồn 103.77.241
     try {
         const res = await fetch('http://103.77.241.31:1901/server/api/moon?X-API-Key=trietgay_2mV0EbvgjwblbGTRxATml8RNDLgRR0l80wM5AM1M', {
             headers: {
@@ -198,23 +226,24 @@ async function updateAll() {
         });
         
         const json = await res.json();
-        const sourceName = '103.77.241';
+        const sourceName = 'Fullmoon';
 
         if (json?.success && json?.data) {
             if (!allGroups[sourceName]) allGroups[sourceName] = [];
             json.data.forEach(item => {
                 allGroups[sourceName].push({
-                    placeId: item.PlaceId,
+                    placeId: item.PlaceId || "27470683",
                     players: normalizePlayers(item.Players),
                     jobId: item.JobId
                 });
             });
-            console.log(`  ✅ ${sourceName}: ${json.count ?? json.data.length} server`);
+            console.log(`  ✅ 103.77.241: ${json.count ?? json.data.length} server`);
         }
     } catch (e) {
         console.error(`  ❌ 103.77.241: ${e.message}`);
     }
 
+    // 4. Nguồn noencode
     const noEncodeFetchPromises = apiCau3.map(async (api) => {
         try {
             const res = await fetch(api.url, {
@@ -239,7 +268,7 @@ async function updateAll() {
                 if (!allGroups[api.name]) allGroups[api.name] = [];
                 list.forEach(item => {
                     allGroups[api.name].push({
-                        placeId: pickField(item, ['place_id', 'placeId', 'placeid', 'PlaceId']),
+                        placeId: pickField(item, ['place_id', 'placeId', 'placeid', 'PlaceId']) || "27470683",
                         players: normalizePlayers(pickField(item, ['player_count', 'players', 'Players', 'player', 'playerCount'])),
                         jobId: pickField(item, ['Job_id', 'jobId', 'jobid', 'JobId'])
                     });
@@ -255,6 +284,7 @@ async function updateAll() {
 
     await Promise.allSettled([...fetchPromises, ...noEncodeFetchPromises]);
 
+    // Gộp các nhóm và lưu
     const mergedGroups = {};
     for (const name in allGroups) {
         const key = name.replace(/\s+/g, '').toLowerCase();
